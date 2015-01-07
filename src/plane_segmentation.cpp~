@@ -1,0 +1,169 @@
+/*************************************************************************
+	> File Name: plane_segentation.cpp
+	> Author: yincanben
+	> Mail: yincanben@163.com
+	> Created Time: Tue 30 Dec 2014 03:32:49 PM CST
+ ************************************************************************/
+
+#include<iostream>
+#include <pcl/io/openni_grabber.h>
+#include <pcl/visualization/cloud_viewer.h>
+#include <pcl/point_types.h>
+#include <pcl/filters/passthrough.h>
+#include <pcl/ModelCoefficients.h>
+#include <pcl/io/pcd_io.h>
+#include <pcl/point_types.h>
+#include <pcl/sample_consensus/method_types.h>
+#include <pcl/sample_consensus/model_types.h>
+#include <pcl/segmentation/sac_segmentation.h>
+#include <pcl/segmentation/extract_clusters.h>
+#include <pcl/common/impl/angles.hpp>
+#include <pcl/filters/voxel_grid.h>
+#include <pcl/filters/extract_indices.h>
+using namespace std;
+
+class SimpleOpenNIViewer 
+{ 
+    public: 
+        SimpleOpenNIViewer (); 
+
+        void cloud_cb_ (const pcl::PointCloud<pcl::PointXYZRGBA>::ConstPtr &cloud); 
+
+        void run (); 
+
+        pcl::visualization::CloudViewer viewer; 
+
+}; 
+
+
+SimpleOpenNIViewer::SimpleOpenNIViewer(): viewer ("PCL OpenNI Viewer") { } 
+
+void SimpleOpenNIViewer::cloud_cb_(const pcl::PointCloud<pcl::PointXYZRGBA>::ConstPtr &cloud) 
+{ 
+    if (!viewer.wasStopped()) 
+    { 
+        pcl::PointCloud<pcl::PointXYZRGBA>::Ptr cloud_filtered (new pcl::PointCloud<pcl::PointXYZRGBA>); 
+        pcl::PointCloud<pcl::PointXYZRGBA>::Ptr cloud_filtered2 (new pcl::PointCloud<pcl::PointXYZRGBA>); 
+        
+        //FILTERING PROCESS TO ELIMINATE EVERYTHING BUT THE SURFACE 
+        pcl::PassThrough<pcl::PointXYZRGBA> pass; 
+        pass.setInputCloud (cloud); 
+        pass.setFilterFieldName ("z"); 
+        pass.setFilterLimits (0, 4.0); 
+        pass.filter (*cloud_filtered); 
+
+        pass.setInputCloud (cloud_filtered); 
+        pass.setFilterFieldName ("x"); 
+        pass.setFilterLimits (-4.0, 4.0); 
+        //pass.setFilterLimitsNegative (true); 
+        pass.filter (*cloud_filtered); 
+
+        pass.setInputCloud (cloud_filtered); 
+        pass.setFilterFieldName ("y"); 
+        pass.setFilterLimits (-4.0, 4.0); 
+        pass.filter (*cloud_filtered); 
+
+        //DOWNSAMPLING RESULTING POINT CLOUD 
+        pcl::VoxelGrid<pcl::PointXYZRGBA> sor; 
+        sor.setInputCloud (cloud_filtered); 
+        sor.setLeafSize (0.01f, 0.01f, 0.01f); 
+        sor.filter (*cloud_filtered2); 
+        
+        //SEGMENT SURFACE 
+        pcl::ModelCoefficients::Ptr coefficients (new pcl::ModelCoefficients); 
+        pcl::PointIndices::Ptr inliers (new pcl::PointIndices); 
+        // Create the segmentation object 
+        pcl::SACSegmentation<pcl::PointXYZRGBA> seg; 
+        // Optional 
+        seg.setOptimizeCoefficients (true); 
+
+        // Mandatory 
+        seg.setModelType (pcl::SACMODEL_PERPENDICULAR_PLANE);
+        //seg.setMethodType (pcl::SACMODEL_NORMAL_PARALLEL_PLANE) ;
+        seg.setAxis(Eigen::Vector3f(0.0,1.0,0.0));
+        seg.setEpsAngle (pcl::deg2rad (20.0));
+        seg.setMethodType (pcl::SAC_RANSAC); 
+        seg.setDistanceThreshold (0.01); //1cm
+        seg.setInputCloud (cloud_filtered2->makeShared()); 
+        seg.segment (*inliers, *coefficients);
+
+        pcl::PointCloud<pcl::PointXYZRGBA>::Ptr cloud_plane (new pcl::PointCloud<pcl::PointXYZRGBA> ()) ;
+        pcl::ExtractIndices<pcl::PointXYZRGBA> extract;
+        extract.setInputCloud (cloud_filtered2);
+        extract.setIndices (inliers);
+        extract.setNegative (false);
+        // Get the points associated with the planar surface
+        extract.filter (*cloud_plane);
+        extract.setNegative (true);
+        extract.filter ( *cloud_filtered2 ) ;
+
+        pcl::search::KdTree<pcl::PointXYZRGBA>::Ptr tree (new pcl::search::KdTree<pcl::PointXYZRGBA>);
+        tree->setInputCloud (cloud_filtered2);
+
+        std::vector<pcl::PointIndices> cluster_indices ;
+        pcl::EuclideanClusterExtraction<pcl::PointXYZRGBA> ec ;
+        ec.setClusterTolerance (0.02) ; // 2cm
+        ec.setMinClusterSize (1000) ;
+        ec.setMaxClusterSize (25000) ;
+        ec.setSearchMethod (tree) ;
+        ec.setInputCloud (cloud_filtered2) ;
+        ec.extract (cluster_indices) ;
+
+        /*int j = 0 ;
+        for (std::vector<pcl::PointIndices>::const_iterator it = cluster_indices.begin (); it != cluster_indices.end (); ++it){
+            pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_cluster (new pcl::PointCloud<pcl::PointXYZ>);
+            for (std::vector<int>::const_iterator pit = it->indices.begin (); pit != it->indices.end (); pit++)
+                cloud_cluster->points.push_back (cloud_filtered->points[*pit]); 
+            cloud_cluster->width = cloud_cluster->points.size ();
+            cloud_cluster->height = 1;
+            cloud_cluster->is_dense = true;
+
+            std::cout << "PointCloud representing the Cluster: " << cloud_cluster->points.size () << " data points." << std::endl;
+            std::stringstream ss;
+            ss << "cloud_cluster_" << j << ".pcd";
+            writer.write<pcl::PointXYZ> (ss.str (), *cloud_cluster, false); 
+            j++;
+        }*/
+
+        /*if (inliers->indices.size () == 0) 
+        { 
+                PCL_ERROR ("Could not estimate a planar model for the given dataset."); 
+            exit(0); 
+        } 
+        
+        //PAINT SURFACE 
+        for (unsigned int i = 0; i < inliers->indices.size(); i++) 
+        { 
+                int idx = inliers->indices[i]; 
+                cloud_filtered2->points[idx].r = 255; 
+                cloud_filtered2->points[idx].g = 0; 
+                cloud_filtered2->points[idx].b = 0; 
+        } */
+
+        viewer.showCloud(cloud_filtered2); 
+        } 
+} 
+
+void SimpleOpenNIViewer::run() 
+{ 
+    pcl::Grabber* interface = new pcl::OpenNIGrabber(); 
+
+    boost::function<void (const pcl::PointCloud<pcl::PointXYZRGBA>::ConstPtr&)> f = boost::bind (&SimpleOpenNIViewer::cloud_cb_, this, _1); 
+
+    interface->registerCallback (f) ; 
+
+    interface->start () ; 
+
+    while (!viewer.wasStopped()) 
+    { 
+        boost::this_thread::sleep (boost::posix_time::seconds (1)) ; 
+    } 
+
+        interface->stop (); 
+} 
+int main () 
+{ 
+    SimpleOpenNIViewer v; 
+    v.run (); 
+    return 0; 
+} 
